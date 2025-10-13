@@ -1,0 +1,29 @@
+.navBackdrop {
+  background:
+    radial-gradient(
+      1200px 600px at 20% -20%,
+      rgba(37, 99, 235, 0.18),
+      transparent 60%
+    ),
+    radial-gradient(
+      1000px 400px at 80% -20%,
+      rgba(245, 158, 11, 0.18),
+      transparent 60%
+    );
+  backdrop-filter: saturate(1.2) blur(4px);
+}
+
+.activeLink {
+  position: relative;
+}
+
+.activeLink::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -6px;
+  height: 2px;
+  background: linear-gradient(90deg, #2563eb, #f59e0b);
+  border-radius: 999px;
+}

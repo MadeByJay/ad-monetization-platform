@@ -1,0 +1,148 @@
+{
+  "info": {
+    "name": "AMP Local — Brand Safety & Health",
+    "_postman_id": "c54e5d3b-amp-local",
+    "description": "AMP API with health, preview, simulate, exports, and brand-safety controls.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4311/api" },
+    { "key": "scenarioId", "value": "" },
+    { "key": "runId", "value": "" },
+    { "key": "correlationId", "value": "{{$guid}}" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "request": { "method": "GET", "url": "{{baseUrl}}/healthz" }
+        },
+        {
+          "name": "GET /readyz",
+          "request": { "method": "GET", "url": "{{baseUrl}}/readyz" }
+        },
+        {
+          "name": "GET /docs (Swagger UI)",
+          "request": {
+            "method": "GET",
+            "url": "http://localhost:4311/api/docs"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Scenarios",
+      "item": [
+        {
+          "name": "POST /scenarios (create, with brandSafety)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "x-correlation-id", "value": "{{correlationId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"News Video (PG)\",\n  \"config_json\": {\n    \"content\": {\n      \"kind\": \"video\",\n      \"brandSafety\": \"PG\",\n      \"placements\": [\n        {\"slotType\":\"preroll\"}, {\"slotType\":\"midroll\"}, {\"slotType\":\"display\"}\n      ]\n    },\n    \"cohort\": {\n      \"geoWeights\": {\"US\":0.6,\"IN\":0.2,\"GB\":0.1,\"CA\":0.1},\n      \"deviceWeights\": {\"desktop\":0.5,\"mobile\":0.5},\n      \"contentTags\":[\"news\",\"sports\"]\n    }\n  }\n}"
+            },
+            "url": "{{baseUrl}}/scenarios"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', ()=>pm.response.to.have.status(200));",
+                  "const j = pm.response.json(); if (j.id) pm.collectionVariables.set('scenarioId', j.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /scenarios/preview (by scenario_id + brand_safety override)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "x-correlation-id", "value": "{{correlationId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scenario_id\": \"{{scenarioId}}\",\n  \"sample_size\": 30,\n  \"brand_safety\": \"PG\"\n}"
+            },
+            "url": "{{baseUrl}}/scenarios/preview"
+          }
+        },
+        {
+          "name": "POST /scenarios/preview (raw config + brandSafety)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "content-type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"config_json\": {\n    \"content\": {\"placements\":[{\"slotType\":\"display\"}], \"brandSafety\":\"G\"},\n    \"cohort\": {\"geoWeights\":{\"US\":1}, \"deviceWeights\":{\"desktop\":1}, \"contentTags\":[\"tech\"]}\n  },\n  \"sample_size\": 20\n}"
+            },
+            "url": "{{baseUrl}}/scenarios/preview"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Simulate",
+      "item": [
+        {
+          "name": "POST /simulate/run (with scenarioId + content_brand_safety)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "x-correlation-id", "value": "{{correlationId}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scenario_id\": \"{{scenarioId}}\",\n  \"content_brand_safety\": \"PG\"\n}"
+            },
+            "url": "{{baseUrl}}/simulate/run"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', ()=>pm.response.to.have.status(200));",
+                  "const j = pm.response.json(); if (j.run_id) pm.collectionVariables.set('runId', j.run_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /simulate/run/:id/summary",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/simulate/run/{{runId}}/summary"
+          }
+        },
+        {
+          "name": "GET /simulate/run/:id/export.csv",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/simulate/run/{{runId}}/export.csv"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Runs",
+      "item": [
+        {
+          "name": "GET /runs",
+          "request": { "method": "GET", "url": "{{baseUrl}}/runs" }
+        }
+      ]
+    }
+  ]
+}

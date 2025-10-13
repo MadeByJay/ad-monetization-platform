@@ -1,0 +1,12 @@
+.barTrack {
+  background: #f1f3f5;
+  border-radius: 8px;
+  height: 14px;
+  overflow: hidden;
+}
+
+.barFill {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb, #f59e0b);
+  width: var(--bar-width, 0%);
+}

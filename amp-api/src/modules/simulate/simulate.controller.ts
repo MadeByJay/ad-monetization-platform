@@ -1,0 +1,54 @@
+import {
+  Body,
+  Controller,
+  Get,
+  Header,
+  Param,
+  Post,
+  Query,
+  Res,
+} from '@nestjs/common';
+import type { Response } from 'express';
+import { SimulateService } from './simulate.service';
+import { StartRunDto } from './dto/start-run.dto';
+
+@Controller()
+export class SimulateController {
+  constructor(private readonly simulateService: SimulateService) {}
+
+  @Post('simulate/run')
+  async startRun(@Body() payload: StartRunDto) {
+    return this.simulateService.startRun(payload);
+  }
+
+  @Get('simulate/run/:id')
+  async getRun(@Param('id') runId: string) {
+    return this.simulateService.getRun(runId);
+  }
+
+  @Get('runs')
+  async listRuns(@Query('limit') limit?: string) {
+    const n = Math.max(1, Math.min(500, Number(limit ?? 50)));
+    return this.simulateService.listRuns(n);
+  }
+
+  @Get('simulate/run/:id/summary')
+  async getRunSummary(@Param('id') runId: string) {
+    return this.simulateService.getRunSummary(runId);
+  }
+
+  @Get('simulate/run/:id/export.json')
+  @Header('Content-Type', 'application/json')
+  async exportJson(@Param('id') runId: string) {
+    return this.simulateService.exportRunJson(runId);
+  }
+
+  @Get('simulate/run/:id/export.csv')
+  async exportCsv(@Param('id') runId: string, @Res() res: Response) {
+    const { filename, content } =
+      await this.simulateService.exportRunCsv(runId);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(content);
+  }
+}

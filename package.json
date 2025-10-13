@@ -1,0 +1,12 @@
+{
+  "name": "ad-tech-simulator",
+  "private": true,
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "dev": "echo 'Run services via docker compose up'",
+    "build": "echo 'Build inside each package or via Dockerfiles'",
+    "lint": "echo 'add eslint later'"
+  }
+}
