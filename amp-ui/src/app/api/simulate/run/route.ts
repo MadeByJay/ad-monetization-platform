@@ -1,12 +1,12 @@
-import { forwardToApi } from '../../_upstream'
+import { forwardToApi } from "../../_upstream";
 
 export async function POST(request: Request) {
-  const body = await request.json().catch(() => ({}))
+  const body = await request.json();
 
-  const result = await forwardToApi('/simulate/run', {
-    method: 'POST',
-    body: JSON.stringify(body)
-  })
+  const result = await forwardToApi("/simulate/run", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
-  return new Response(await result.text(), { status: result.status })
+  return new Response(await result.text(), { status: result.status });
 }

@@ -37,6 +37,19 @@ export class SimulateController {
     return this.simulateService.getRunSummary(runId);
   }
 
+  @Get('simulate/run/:id/impressions')
+  async getRunImpressions(
+    @Param('id') id: string,
+    @Query('offset') offset?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.simulateService.getRunImpressions(
+      id,
+      Number(offset ?? 0),
+      Math.max(1, Math.min(500, Number(limit ?? 50))),
+    );
+  }
+
   @Get('simulate/run/:id/export.json')
   @Header('Content-Type', 'application/json')
   async exportJson(@Param('id') runId: string) {

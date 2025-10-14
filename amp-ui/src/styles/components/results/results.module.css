@@ -10,3 +10,40 @@
   background: linear-gradient(90deg, #2563eb, #f59e0b);
   width: var(--bar-width, 0%);
 }
+
+.lineChart {
+  height: 160px;
+  position: relative;
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.08), transparent);
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+}
+
+.line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #2563eb, #f59e0b);
+  transform-origin: left bottom;
+}
+
+.traceModal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: grid;
+  place-items: center;
+}
+
+.traceCard {
+  width: min(900px, 92vw);
+  max-height: 80vh;
+  overflow: auto;
+  background: white;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  padding: 16px;
+}

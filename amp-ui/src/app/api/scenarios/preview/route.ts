@@ -1,7 +1,7 @@
 import { forwardToApi } from "../../_upstream";
 
 export async function POST(request: Request) {
-  const body = await request.json().catch(() => ({}));
+  const body = await request.json();
 
   const result = await forwardToApi("/scenarios/preview", {
     method: "POST",

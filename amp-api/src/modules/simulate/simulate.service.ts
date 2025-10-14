@@ -139,6 +139,7 @@ export class SimulateService {
 
   async getRunSummary(runId: string) {
     const run = await this.repositories.runs.get(runId);
+
     if (!run) return { error: 'run_not_found' };
 
     const impressions = await this.repositories.impressions.listByRun(runId);
@@ -158,42 +159,62 @@ export class SimulateService {
         )
       : 0;
 
-    // spend per campaign (delivered only)
+    // spend per campaign
     const spendByCampaign: Record<
       string,
       { impressions: number; revenue: number }
     > = {};
-    for (const row of delivered) {
-      const key = row.campaign_id as string;
-      spendByCampaign[key] ??= { impressions: 0, revenue: 0 };
-      spendByCampaign[key].impressions += 1;
-      spendByCampaign[key].revenue += Number(row.revenue ?? 0);
-    }
-    for (const key of Object.keys(spendByCampaign)) {
-      spendByCampaign[key].revenue = Number(
-        spendByCampaign[key].revenue.toFixed(6),
-      );
-    }
-
-    // reasons (from trace_json.dropped)
+    // winners by slot
+    const winnersBySlot: Record<string, Record<string, number>> = {};
+    // stacked drop reasons
     const dropReasons: Record<string, number> = {};
+    // minute-bucket spend over time
+    const spendOverTime: Record<string, number> = {};
+
     for (const row of impressions) {
+      const ts = (row as any).ts ? new Date((row as any).ts) : null;
+
+      const bucket = ts
+        ? new Date(
+            ts.getFullYear(),
+            ts.getMonth(),
+            ts.getDate(),
+            ts.getHours(),
+            ts.getMinutes(),
+            0,
+          ).toISOString()
+        : 'unknown';
+      spendOverTime[bucket] =
+        (spendOverTime[bucket] ?? 0) + Number(row.revenue ?? 0);
+
       const trace =
         typeof row.trace_json === 'string'
           ? JSON.parse(row.trace_json as any)
           : (row.trace_json as any);
+
       const dropped: Array<{ reason: string }> = Array.isArray(trace?.dropped)
         ? trace.dropped
         : [];
+
       for (const { reason } of dropped)
         dropReasons[reason] = (dropReasons[reason] ?? 0) + 1;
+
+      if (row.campaign_id) {
+        const cid = row.campaign_id as string;
+        spendByCampaign[cid] ??= { impressions: 0, revenue: 0 };
+        spendByCampaign[cid].impressions += 1;
+        spendByCampaign[cid].revenue += Number(row.revenue ?? 0);
+
+        winnersBySlot[row.slot_type] ??= {};
+        winnersBySlot[row.slot_type][cid] =
+          (winnersBySlot[row.slot_type][cid] ?? 0) + 1;
+      }
     }
 
-    // slot mix
-    const slotMix: Record<string, number> = {};
-    impressions.forEach((r) => {
-      slotMix[r.slot_type] = (slotMix[r.slot_type] ?? 0) + 1;
-    });
+    for (const k of Object.keys(spendByCampaign))
+      spendByCampaign[k].revenue = Number(
+        spendByCampaign[k].revenue.toFixed(6),
+      );
 
     return {
       run: {
@@ -211,9 +232,24 @@ export class SimulateService {
         average_cpm_delivered: avgCpmDelivered,
         spend_by_campaign: spendByCampaign,
         drop_reasons: dropReasons,
-        slot_mix: slotMix,
+        slot_mix: impressions.reduce(
+          (acc: any, r) => (
+            (acc[r.slot_type] = (acc[r.slot_type] ?? 0) + 1),
+            acc
+          ),
+          {},
+        ),
+        spend_over_time: spendOverTime,
+        winners_by_slot: winnersBySlot,
       },
     };
+  }
+
+  async getRunImpressions(runId: string, offset = 0, limit = 50) {
+    const all = await this.repositories.impressions.listByRun(runId);
+    const slice = all.slice(offset, offset + limit);
+    const total = all.length;
+    return { total, offset, limit, items: slice };
   }
 
   async exportRunJson(runId: string) {

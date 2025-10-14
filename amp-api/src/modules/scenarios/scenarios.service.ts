@@ -23,6 +23,11 @@ export class ScenariosService {
     return { scenarios };
   }
 
+  async get(id: string) {
+    const scenario = await this.repositories.scenarios.get(id);
+    return scenario ?? { error: 'scenario_not_found' };
+  }
+
   async create(payload: CreateScenarioPayload) {
     if (
       typeof payload?.name !== 'string' ||
@@ -30,7 +35,9 @@ export class ScenariosService {
     ) {
       throw new BadRequestException('invalid_payload');
     }
+
     const id = crypto.randomUUID();
+
     await this.repositories.scenarios.create({
       id,
       name: payload.name,
@@ -38,7 +45,41 @@ export class ScenariosService {
       // created_at defaulted by DB
       created_at: undefined as never,
     });
+
     return { id };
+  }
+
+  async update(
+    id: string,
+    payload: { name: string; config_json: Record<string, unknown> },
+  ) {
+    const found = await this.repositories.scenarios.get(id);
+    if (!found) throw new BadRequestException('scenario_not_found');
+
+    // use DB directly for partial update
+    const db: any = (this as any).repositories?.database ?? null;
+
+    await (db ?? (this.repositories as any).database)
+      .updateTable('scenarios')
+      .set({
+        name: payload.name,
+        config_json: JSON.stringify(payload.config_json),
+      })
+      .where('id', '=', id)
+      .execute();
+
+    return { id };
+  }
+
+  async remove(id: string) {
+    const db: any = (this as any).repositories?.database ?? null;
+
+    await (db ?? (this.repositories as any).database)
+      .deleteFrom('scenarios')
+      .where('id', '=', id)
+      .execute();
+
+    return { id, deleted: true };
   }
 
   async preview(
@@ -54,12 +95,14 @@ export class ScenariosService {
       const scenario = await this.repositories.scenarios.get(
         payload.scenario_id,
       );
+
       if (!scenario) throw new BadRequestException('scenario_not_found');
       config =
         typeof scenario.config_json === 'string'
           ? JSON.parse(scenario.config_json as unknown as string)
           : (scenario.config_json as Record<string, unknown>);
     }
+
     if (!config) throw new BadRequestException('missing_config_or_scenario_id');
 
     const placements = Array.isArray((config as any)?.content?.placements)
@@ -72,6 +115,7 @@ export class ScenariosService {
         (s): s is SlotType =>
           s === 'preroll' || s === 'midroll' || s === 'display',
       );
+
     if (slotTypes.length === 0) slotTypes.push('display');
 
     const geoWeights = (config as any)?.cohort?.geoWeights ?? { US: 1 };
@@ -106,12 +150,14 @@ export class ScenariosService {
           Object.values(deviceWeights),
           rand,
         ) as 'desktop' | 'mobile';
+
         const tags = pickSome(
           contentTags,
           1 + Math.floor(rand() * Math.min(3, Math.max(1, contentTags.length))),
         );
         const ts = new Date();
         const userId = `${device}_${geo}`;
+
         return {
           slotType,
           user: { geo, device, userId },
@@ -162,10 +208,12 @@ function pickWeighted<T>(
     (a, b) => a + (Number.isFinite(b) ? Number(b) : 0),
     0,
   );
+
   if (total <= 0) {
     const index = Math.floor(rand() * items.length);
     return items[index];
   }
+
   const r = rand() * total;
   let acc = 0;
   for (let i = 0; i < items.length; i++) {
