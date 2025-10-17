@@ -2,15 +2,18 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import styles from "../styles/components/navbar/navbar.module.css";
+
+const apiBase = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:4311/api";
+const apiDocsUrl =
+  process.env.NEXT_PUBLIC_API_DOCS_URL ?? `${apiBase.replace(/\/$/, "")}/docs`;
 
 const links = [
   { href: "/", label: "Home" },
   { href: "/simulator", label: "Simulator" },
   { href: "/scenarios/preview", label: "Scenarios Preview" },
   { href: "/results", label: "Results" },
-  { href: "http://localhost:4311/api/docs", label: "API Docs", external: true },
+  { href: apiDocsUrl, label: "API Docs", external: true },
 ];
 
 function UserMenu() {

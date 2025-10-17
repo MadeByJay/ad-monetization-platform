@@ -6,20 +6,28 @@ export const upstreamBaseUrl =
   "http://localhost:4311/api";
 
 export async function forwardToApi(pathname: string, init?: RequestInit) {
-  // Read the inbound request cookies and forward them to the API
   const incomingHeaders = await headers();
   const cookieHeader = incomingHeaders.get("cookie") ?? "";
 
   const url = `${upstreamBaseUrl}${pathname}`;
-  const response = await fetch(url, {
+  const headersInit = new Headers(init?.headers);
+
+  if (cookieHeader && !headersInit.has("cookie")) {
+    headersInit.set("cookie", cookieHeader);
+  }
+
+  if (init?.body && !headersInit.has("content-type")) {
+    headersInit.set("content-type", "application/json");
+  }
+
+  const requestInit: RequestInit = {
     ...init,
-    headers: {
-      ...(cookieHeader ? { cookie: cookieHeader } : {}), 
-      ...(init?.headers || {}),
-      "content-type": "application/json",
-      "cache-control": "no-store",
-    },
-    cache: "no-store",
-  });
-  return response;
+    headers: headersInit,
+  };
+
+  if (!requestInit.cache) {
+    requestInit.cache = "no-store";
+  }
+
+  return fetch(url, requestInit);
 }

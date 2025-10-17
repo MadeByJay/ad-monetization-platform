@@ -7,5 +7,5 @@ export async function GET(req: Request) {
 
   const res = await forwardToApi(path, { method: "GET" });
 
-  return new Response(await res.text(), { status: res.status });
+  return new Response(res.body, { status: res.status, headers: res.headers });
 }

@@ -3,7 +3,7 @@ import { forwardToApi } from "../_upstream";
 export async function GET() {
   const result = await forwardToApi("/scenarios", { method: "GET" });
 
-  return new Response(await result.text(), { status: result.status });
+  return new Response(result.body, { status: result.status, headers: result.headers });
 }
 
 export async function POST(request: Request) {
@@ -14,5 +14,5 @@ export async function POST(request: Request) {
     body: JSON.stringify(body),
   });
 
-  return new Response(await result.text(), { status: result.status });
+  return new Response(result.body, { status: result.status, headers: result.headers });
 }

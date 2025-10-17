@@ -5,8 +5,8 @@ import { useState } from "react";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("demo@amp.local");
-  const [password, setPassword] = useState("demo123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [errorText, setErrorText] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -43,6 +43,7 @@ export default function LoginPage() {
           <input
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            placeholder="demo@amp.local"
             className="w-full rounded-lg border border-gray-300 px-3 py-2"
           />
         </div>
@@ -54,6 +55,7 @@ export default function LoginPage() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            placeholder="demo123"
             className="w-full rounded-lg border border-gray-300 px-3 py-2"
           />
         </div>
@@ -68,7 +70,7 @@ export default function LoginPage() {
         >
           {isSubmitting ? "Signing in…" : "Sign in"}
         </button>
-        <div className="text-xs opacity-70">Use demo@amp.local / demo123</div>
+        <div className="text-xs opacity-70">Sign in with the demo credentials shared in the README (demo@amp.local / demo123).</div>
       </form>
     </div>
   );

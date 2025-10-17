@@ -8,5 +8,5 @@ export async function POST(request: Request) {
     body: JSON.stringify(body),
   });
 
-  return new Response(await response.text(), { status: response.status });
+  return new Response(response.body, { status: response.status, headers: response.headers });
 }
