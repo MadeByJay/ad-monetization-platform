@@ -6,6 +6,39 @@ import { MetricsService } from '../metrics/metrics.service';
 import { FrequencyService } from '../frequency/frequency.service';
 import type { AuctionTrace, SlotOpportunity } from './auction.types';
 
+type Rating =
+  | 'TV-Y'
+  | 'TV-Y7'
+  | 'TV-G'
+  | 'TV-PG'
+  | 'TV-14'
+  | 'TV-MA'
+  | 'G'
+  | 'PG'
+  | 'PG-13'
+  | 'R'
+  | 'NC-17';
+
+const ratingRank: Record<string, number> = {
+  'TV-Y': 0,
+  'TV-Y7': 1,
+  'TV-G': 2,
+  G: 2,
+  'TV-PG': 3,
+  PG: 3,
+  'TV-14': 4,
+  'PG-13': 4,
+  'TV-MA': 5,
+  R: 5,
+  'NC-17': 6,
+};
+
+export interface AuctionContext {
+  runId: string;
+  // In-run policy memory (avoid DB roundtrips for competitive separation)
+  recentWins?: Map<string, Array<{ ts: number; categories: string[] }>>; // key: category
+}
+
 function stableHash(input: string): number {
   // simple 32-bit FNV-1a
   let hash = 0x811c9dc5;
@@ -25,15 +58,12 @@ function stableHash(input: string): number {
 
 @Injectable()
 export class AuctionService {
-  private readonly floorPriceCpm = Math.max(
-    0,
-    Number(process.env.FLOOR_PRICE_CPM ?? 0),
-  ); // e.g., 0 → no floor
-  private readonly allowedBrandSafety: Set<string> = new Set(
-    (process.env.BRAND_SAFETY_ALLOW ?? 'G,PG')
-      .split(',')
-      .map((s) => s.trim().toUpperCase())
-      .filter(Boolean),
+  private readonly globalFloor = Number(
+    process.env.FLOOR_PRICE_CPM_GLOBAL ?? 0,
+  );
+
+  private readonly firstInPodFloor = Number(
+    process.env.FLOOR_PRICE_CPM_FIRST_IN_POD ?? 0,
   );
 
   constructor(
@@ -43,163 +73,291 @@ export class AuctionService {
     private readonly metrics: MetricsService,
     private readonly frequency: FrequencyService,
   ) {}
-
-  private priorityMultiplier(priority: number): number {
-    return 1 + (Math.min(Math.max(priority, 1), 10) - 1) * 0.0555556;
-  }
-
-  async run(opportunity: SlotOpportunity): Promise<AuctionTrace> {
-    const campaigns = await this.repositories.campaigns.list();
-    const creatives = await this.repositories.creatives.list();
+  async run(
+    opportunity: SlotOpportunity,
+    ctx: AuctionContext,
+  ): Promise<AuctionTrace> {
+    const now = opportunity.ts;
+    const lineItems =
+      await this.repositories.lineItemsAuction.listActiveAt(now);
 
     const trace: AuctionTrace = {
       slotType: opportunity.slotType,
-      eligibleCampaignIds: [],
+      eligibleCampaignIds: [], // deprecated semantic; kept for UI compat
       dropped: [],
       scored: [],
     };
 
-    for (const campaign of campaigns) {
-      if (!campaign.active) {
-        trace.dropped.push({ reason: 'inactive', campaignId: campaign.id });
-        this.metrics.eligibilityDroppedTotal.labels('inactive').inc();
-        continue;
-      }
+    const requiredFormat =
+      opportunity.slotType === 'display' ? 'display' : 'video';
+    const isFirstInPod = (opportunity as any).pod?.position === 1;
+    const placementFloor = isFirstInPod ? this.firstInPodFloor : 0;
 
-      const formats: string[] = Array.isArray(campaign.formats_json)
-        ? (campaign.formats_json as any)
-        : [];
-      if (!formats.includes(opportunity.slotType)) {
-        trace.dropped.push({
-          reason: 'format_mismatch',
-          campaignId: campaign.id,
-        });
+    for (const li of lineItems) {
+      // TARGETING
+      const targeting =
+        typeof li.targeting_json === 'string'
+          ? JSON.parse(li.targeting_json as any)
+          : (li.targeting_json as any);
+
+      if (!this.matchBasicTargeting(opportunity, targeting)) {
+        trace.dropped.push({ reason: 'format_mismatch', campaignId: li.id });
         this.metrics.eligibilityDroppedTotal.labels('format_mismatch').inc();
         continue;
       }
 
-      const mediaType =
-        opportunity.slotType === 'display' ? 'display' : 'video';
-      const candidateCreatives = creatives.filter(
-        (c) => c.campaign_id === campaign.id && c.type === mediaType,
+      // DAYPART
+      if (!this.matchDaypart(now, targeting?.dayparts)) {
+        trace.dropped.push({ reason: 'inactive', campaignId: li.id });
+        this.metrics.eligibilityDroppedTotal.labels('inactive').inc();
+        continue;
+      }
+
+      // CONTENT rating/genre/service/app (best-effort)
+      if (!this.matchContentFacets(opportunity, targeting)) {
+        trace.dropped.push({ reason: 'brand_safety', campaignId: li.id });
+        this.metrics.eligibilityDroppedTotal.labels('brand_safety').inc();
+        continue;
+      }
+
+      // CATEGORY EXCLUSION vs content tags
+      const { exclusions, separations } =
+        await this.repositories.lineItemsAuction.getPolicies(li.id);
+
+      const contentTags: string[] = opportunity.content.tags ?? [];
+
+      if (exclusions.some((cat) => contentTags.includes(cat))) {
+        trace.dropped.push({ reason: 'brand_safety', campaignId: li.id });
+        this.metrics.eligibilityDroppedTotal.labels('brand_safety').inc();
+        continue;
+      }
+
+      // COMPETITIVE SEPARATION vs recent wins (in-memory per run)
+      if (separations.length && this.violatesSeparation(separations, ctx)) {
+        trace.dropped.push({ reason: 'pacing_overspend', campaignId: li.id }); // reuse reason bucket; we also count policy below
+        this.metrics.eligibilityDroppedTotal.labels('pacing_overspend').inc();
+        continue;
+      }
+
+      // CREATIVE FILTER (format + safety)
+      const creatives = await this.repositories.lineItemsAuction.getCreatives(
+        li.id,
       );
-      if (candidateCreatives.length === 0) {
-        trace.dropped.push({ reason: 'no_creatives', campaignId: campaign.id });
+
+      const usable = creatives.filter((c) => {
+        const typeOk = c.type === requiredFormat;
+        const ratingOk = this.creativeVsContentSafetyOk(
+          opportunity.content.rating as any,
+          c.brand_safety ?? 'G',
+        );
+        return typeOk && ratingOk;
+      });
+
+      if (usable.length === 0) {
+        trace.dropped.push({ reason: 'no_creatives', campaignId: li.id });
         this.metrics.eligibilityDroppedTotal.labels('no_creatives').inc();
         continue;
       }
 
-      // Frequency cap
-      const userId =
-        opportunity.user.userId ??
-        `${opportunity.user.device ?? 'unknown'}_${opportunity.user.geo ?? 'NA'}`;
-      const freqCap = Number(campaign.freq_cap_user_day || 0);
-      const freqDecision = await this.frequency.check({
-        campaignId: campaign.id,
-        userId,
-        capPerUserPerDay: freqCap,
-        now: opportunity.ts,
-      });
-      if (!freqDecision.eligible) {
-        trace.dropped.push({ reason: 'frequency', campaignId: campaign.id });
-        this.metrics.eligibilityDroppedTotal.labels('frequency').inc();
-        continue;
-      }
+      // FLOORS (global + placement + LI floors)
+      const liFloors =
+        typeof li.floors_json === 'string'
+          ? JSON.parse(li.floors_json as any)
+          : (li.floors_json as any);
 
-      // Pacing / budget
-      const pacingDecision = await this.pacing.check({
-        campaignId: campaign.id,
-        dailyBudget: Number(campaign.daily_budget),
-        pacingStrategy: (campaign.pacing_strategy as 'even' | 'asap') || 'even',
-        now: opportunity.ts,
-      });
-      if (!pacingDecision.eligible) {
-        trace.dropped.push({ reason: 'budget', campaignId: campaign.id });
-        this.metrics.eligibilityDroppedTotal.labels('budget').inc();
-        continue;
-      }
+      const liPlacementFloor = isFirstInPod
+        ? Number(liFloors?.first_in_pod ?? 0)
+        : Number(liFloors?.[opportunity.slotType] ?? 0);
 
-      trace.eligibleCampaignIds.push(campaign.id);
-
-      const { score: targetingScore } = this.targeting.scoreCampaign(
-        opportunity,
-        campaign.targeting_json,
+      const effectiveFloor = Math.max(
+        this.globalFloor,
+        placementFloor,
+        liPlacementFloor,
       );
-      const priorityMultiplier = this.priorityMultiplier(campaign.priority);
-      const pacingMultiplier = pacingDecision.pacingMultiplier;
 
-      for (const creative of candidateCreatives) {
-        const cpmBid = Number(campaign.cpm_bid);
+      const bid = Number((li as any).cpm_bid ?? 15);
+      if (bid < effectiveFloor) {
+        trace.dropped.push({ reason: 'floor', campaignId: li.id });
+        this.metrics.eligibilityDroppedTotal.labels('floor').inc();
+        continue;
+      }
 
-        // Floor price check
-        if (this.floorPriceCpm > 0 && cpmBid < this.floorPriceCpm) {
-          trace.dropped.push({ reason: 'floor', campaignId: campaign.id });
-          this.metrics.eligibilityDroppedTotal.labels('floor').inc();
-          continue;
-        }
+      // SCORE (simple: bid × match multipliers; priority later if needed)
+      const targetingScore = this.basicTargetingScore(opportunity, targeting);
+      const finalScore = bid * targetingScore;
 
-        // Brand safety check
-        const creativeRating = (creative.brand_safety ?? 'G').toUpperCase();
-        const contentRating = (
-          opportunity.content.brandSafety ?? 'G'
-        ).toUpperCase();
-        // Rule: creative AND content must be allowed by allowlist.
-        if (
-          !this.allowedBrandSafety.has(creativeRating) ||
-          !this.allowedBrandSafety.has(contentRating)
-        ) {
-          trace.dropped.push({
-            reason: 'brand_safety',
-            campaignId: campaign.id,
-          });
-          this.metrics.eligibilityDroppedTotal.labels('brand_safety').inc();
-          continue;
-        }
-
-        const finalScore =
-          cpmBid * priorityMultiplier * targetingScore * pacingMultiplier;
-        if (pacingMultiplier < 1) {
-          trace.dropped.push({
-            reason: 'pacing_overspend',
-            campaignId: campaign.id,
-          });
-          this.metrics.eligibilityDroppedTotal.labels('pacing_overspend').inc();
-        }
+      for (const cr of usable) {
         trace.scored.push({
-          campaignId: campaign.id,
-          creativeId: creative.id,
-          cpmBid,
-          priorityMultiplier,
+          campaignId: li.id, // we display LI id as campaign id for now
+          creativeId: cr.id,
+          cpmBid: bid,
+          priorityMultiplier: 1,
           targetingScore,
-          pacingMultiplier,
+          pacingMultiplier: 1,
           finalScore,
         });
       }
     }
 
-    // Winner with deterministic tiebreak
+    // Winner with deterministic tie-break
     if (trace.scored.length > 0) {
       const eps = 1e-9;
       trace.scored.sort((a, b) => {
         const d = b.finalScore - a.finalScore;
+
         if (Math.abs(d) > eps) return d > 0 ? 1 : -1;
-        // tie → deterministic hash on creative+time
+
+        // tie -> deterministic hash on creative+time
         const ha = stableHash(
           `${a.creativeId}:${trace.slotType}:${opportunity.ts.getTime()}`,
         );
         const hb = stableHash(
           `${b.creativeId}:${trace.slotType}:${opportunity.ts.getTime()}`,
         );
+
         return hb - ha;
       });
+
       const top = trace.scored[0];
+
       trace.winner = {
         campaignId: top.campaignId,
         creativeId: top.creativeId,
         finalScore: top.finalScore,
       };
+
+      // Update policy memory for competitive separation
+      const li = lineItems.find((x) => x.id === top.campaignId);
+
+      const liTargeting =
+        typeof li?.targeting_json === 'string'
+          ? JSON.parse(li!.targeting_json as any)
+          : (li?.targeting_json as any);
+
+      const categories: string[] = (liTargeting?.categories ?? []) as string[];
+
+      if (categories?.length) {
+        const store = ctx.recentWins ?? new Map();
+        ctx.recentWins = store;
+        const nowSec = Math.floor(opportunity.ts.getTime() / 1000);
+
+        for (const cat of categories) {
+          const arr = store.get(cat) ?? [];
+          arr.push({ ts: nowSec, categories });
+          store.set(cat, arr);
+        }
+      }
     }
 
     return trace;
+  }
+
+  // helpers 
+  private matchBasicTargeting(opp: SlotOpportunity, t: any): boolean {
+    // format already handled via creative type; check geo/device/slot quick filters
+    if (t?.geo && opp.user.geo && !t.geo.includes(opp.user.geo)) return false;
+
+    if (t?.device && opp.user.device && !t.device.includes(opp.user.device))
+      return false;
+
+    if (t?.slot && !t.slot.includes(opp.slotType)) return false;
+
+    return true;
+  }
+
+  private basicTargetingScore(opp: SlotOpportunity, t: any): number {
+    let s = 1;
+    if (t?.geo && opp.user.geo) s *= t.geo.includes(opp.user.geo) ? 1 : 0.6;
+
+    if (t?.device && opp.user.device)
+      s *= t.device.includes(opp.user.device) ? 1 : 0.8;
+
+    if (t?.genres && opp.content.genre)
+      s *= t.genres.includes(opp.content.genre) ? 1 : 0.7;
+
+    return Math.max(0, Math.min(1, s));
+  }
+
+  private matchDaypart(
+    now: Date,
+    dayparts?: Array<{ start: string; end: string }>,
+  ): boolean {
+    if (!dayparts || !dayparts.length) return true;
+
+    const mins = now.getUTCHours() * 60 + now.getUTCMinutes();
+
+    const toMins = (hhmm: string) => {
+      const [h, m] = hhmm.split(':').map(Number);
+      return (h * 60 + m) % (24 * 60);
+    };
+
+    return dayparts.some(({ start, end }) => {
+      const a = toMins(start),
+        b = toMins(end);
+
+      return a <= b ? mins >= a && mins <= b : mins >= a || mins <= b; // overnight
+    });
+  }
+
+  private matchContentFacets(opp: SlotOpportunity, t: any): boolean {
+    if (
+      t?.services &&
+      opp.content.service_id &&
+      !t.services.includes(opp.content.service_id)
+    )
+      return false;
+
+    if (t?.genres && opp.content.genre && !t.genres.includes(opp.content.genre))
+      return false;
+
+    if (t?.ratings && opp.content.rating) {
+      // LI may declare allowed max rating; we treat as allow-list
+      const ok = (t.ratings as string[]).some(
+        (allowed: string) =>
+          (ratingRank[opp.content.rating!] ?? 99) <=
+          (ratingRank[allowed] ?? 99),
+      );
+
+      if (!ok) return false;
+    }
+    return true;
+  }
+
+  private creativeVsContentSafetyOk(
+    contentRating?: Rating,
+    creativeSafety?: string,
+  ): boolean {
+    if (!contentRating) return true;
+
+    const contentRank = ratingRank[contentRating] ?? 99;
+
+    const map: Record<string, number> = { G: 2, PG: 3, M: 5 }; // approximate mapping to TV ranks
+
+    const creativeRank = map[(creativeSafety ?? 'G').toUpperCase()] ?? 2;
+
+    return creativeRank <= contentRank;
+  }
+
+  private violatesSeparation(
+    seps: Array<{ category: string; min_separation_min: number }>,
+    ctx: AuctionContext,
+  ): boolean {
+    if (!seps.length) return false;
+
+    const memory = ctx.recentWins;
+    if (!memory) return false;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    for (const rule of seps) {
+      const arr = memory.get(rule.category);
+
+      if (!arr || !arr.length) continue;
+
+      const cutoff = nowSec - rule.min_separation_min * 60;
+
+      if (arr.some((e) => e.ts >= cutoff)) return true;
+    }
+    return false;
   }
 }

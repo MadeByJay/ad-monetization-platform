@@ -6,16 +6,18 @@ import { Logger } from 'nestjs-pino';
 import { CorrelationIdInterceptor } from './shared/interceptors/correlation-id.interceptor';
 import { seedWithApp } from './data/seed';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import cookieParser from 'cookie-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
-  const logger = app.get(Logger);
-  app.useLogger(logger);
+  app.use(cookieParser());
 
   app.setGlobalPrefix('api');
   app.enableCors();
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalInterceptors(new CorrelationIdInterceptor());
+  const logger = app.get(Logger);
+  app.useLogger(logger);
 
   // Swagger - I just like the word
   const config = new DocumentBuilder()

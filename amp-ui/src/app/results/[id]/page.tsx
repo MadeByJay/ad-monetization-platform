@@ -2,7 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import styles from "@/styles/components/results/results.module.css";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
+import ImpressionsTable, {
+  ImpressionRow,
+} from "@/components/tables/ImpressionsTable";
+import AdvancedFiltersDrawer from "@/components/AdvancedFiltersDrawer";
 
 type Summary = {
   total_impressions: number;
@@ -37,6 +41,21 @@ type Impression = {
 
 export default function ResultDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const search = useSearchParams();
+  const studioId = search.get("studio_id") || "";
+  const movieId = search.get("movie_id") || "";
+  // const brandId = search.get("brand_id") || "";
+  // const productId = search.get("product_id") || "";
+
+  const selectedBrandId = search.get("brand_id") || "";
+  const selectedProductId = search.get("product_id") || "";
+  const selectedNetworkId = search.get("network_id") || "";
+  const selectedChannelId = search.get("channel_id") || "";
+  const selectedSeriesId = search.get("series_id") || "";
+  const selectedSeasonId = search.get("season_id") || "";
+  const selectedEpisodeId = search.get("episode_id") || "";
+  const selectedServiceId = search.get("service_id") || "";
+  const selectedSlotType = search.get("slot") || "";
 
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -52,24 +71,54 @@ export default function ResultDetailPage() {
   useEffect(() => {
     if (!id) return;
 
-    fetch(`/api/simulate/run/${id}/summary`, { cache: "no-store" })
+    const qs = new URLSearchParams();
+
+    if (studioId) qs.set("studio_id", studioId);
+    if (movieId) qs.set("movie_id", movieId);
+    if (selectedBrandId) qs.set("brand_id", selectedBrandId);
+    if (selectedProductId) qs.set("product_id", selectedProductId);
+    if (selectedNetworkId) qs.set("network_id", selectedNetworkId);
+    if (selectedChannelId) qs.set("channel_id", selectedChannelId);
+    if (selectedSeriesId) qs.set("series_id", selectedSeriesId);
+    if (selectedSeasonId) qs.set("season_id", selectedSeasonId);
+    if (selectedEpisodeId) qs.set("episode_id", selectedEpisodeId);
+    if (selectedServiceId) qs.set("service_id", selectedServiceId);
+    if (selectedSlotType) qs.set("slot", selectedSlotType);
+
+    fetch(`/api/simulate/run/${id}/summary?${qs.toString()}`, {
+      cache: "no-store",
+    })
       .then((r) => r.json())
       .then(setData)
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, studioId, movieId]);
 
   useEffect(() => {
     if (!id) return;
 
-    const offset = page * pageSize;
+    const qs = new URLSearchParams();
 
-    fetch(
-      `/api/simulate/run/${id}/impressions?offset=${offset}&limit=${pageSize}`,
-      { cache: "no-store" },
-    )
+    if (studioId) qs.set("studio_id", studioId);
+    if (movieId) qs.set("movie_id", movieId);
+    if (selectedBrandId) qs.set("brand_id", selectedBrandId);
+    if (selectedProductId) qs.set("product_id", selectedProductId);
+    if (selectedNetworkId) qs.set("network_id", selectedNetworkId);
+    if (selectedChannelId) qs.set("channel_id", selectedChannelId);
+    if (selectedSeriesId) qs.set("series_id", selectedSeriesId);
+    if (selectedSeasonId) qs.set("season_id", selectedSeasonId);
+    if (selectedEpisodeId) qs.set("episode_id", selectedEpisodeId);
+    if (selectedServiceId) qs.set("service_id", selectedServiceId);
+    if (selectedSlotType) qs.set("slot", selectedSlotType);
+
+    qs.set("offset", String(page * pageSize));
+    qs.set("limit", String(pageSize));
+
+    fetch(`/api/simulate/run/${id}/impressions?${qs.toString()}`, {
+      cache: "no-store",
+    })
       .then((r) => r.json())
       .then((d) => setImps({ total: d.total, items: d.items ?? [] }));
-  }, [id, page]);
+  }, [id, page, studioId, movieId]);
 
   const spendRows = useMemo(
     () =>
@@ -118,10 +167,11 @@ export default function ResultDetailPage() {
     window.open(url, "_blank");
   }
 
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(false);
+
   return (
     <div className="grid gap-4">
       <h1 className="text-2xl font-semibold">Run {id.slice(0, 8)}…</h1>
-
       {loading && <div>Loading…</div>}
       {!loading && data?.error && (
         <div className="border border-red-200 bg-red-50 text-red-800 rounded-lg px-3 py-2">
@@ -156,13 +206,13 @@ export default function ResultDetailPage() {
             <Card title="Spend Over Time (min buckets)">
               <div className={styles.lineChart}>
                 {timeSeries.entries.map(([iso, val], i) => {
-                  const w = (Number(val) / timeSeries.max) * 100;
+                  const width = (Number(val) / timeSeries.max) * 100;
                   return (
                     <div
                       key={i}
                       className={styles.line}
                       style={{
-                        width: `${w}%`,
+                        width: `${width}%`,
                         bottom: `${(i / (timeSeries.entries.length || 1)) * 100}%`,
                       }}
                       title={`${iso} · ${Number(val).toFixed(4)}`}
@@ -221,74 +271,22 @@ export default function ResultDetailPage() {
           </div>
 
           {/* Trace table */}
-          <Card
-            title={`Impressions (page ${page + 1} of ${Math.max(1, Math.ceil(imps.total / pageSize))})`}
-          >
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr>
-                    <th className="text-left font-semibold border-b border-gray-200 py-2 pr-3">
-                      #
-                    </th>
-                    <th className="text-left font-semibold border-b border-gray-200 py-2 pr-3">
-                      Slot
-                    </th>
-                    <th className="text-left font-semibold border-b border-gray-200 py-2 pr-3">
-                      Campaign
-                    </th>
-                    <th className="text-left font-semibold border-b border-gray-200 py-2 pr-3">
-                      Revenue
-                    </th>
-                    <th className="text-left font-semibold border-b border-gray-200 py-2 pr-3"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {imps.items.map((r, i) => (
-                    <tr key={r.id}>
-                      <td className="border-b border-gray-100 py-2 pr-3">
-                        {page * pageSize + i + 1}
-                      </td>
-                      <td className="border-b border-gray-100 py-2 pr-3">
-                        {r.slot_type}
-                      </td>
-                      <td className="border-b border-gray-100 py-2 pr-3">
-                        {r.campaign_id ? r.campaign_id.slice(0, 8) + "…" : "—"}
-                      </td>
-                      <td className="border-b border-gray-100 py-2 pr-3">
-                        {(r.revenue ?? 0).toFixed(4)}
-                      </td>
-                      <td className="border-b border-gray-100 py-2 pr-3">
-                        <button
-                          className="text-blue-700 hover:text-blue-800"
-                          onClick={() => setShowTrace(r)}
-                        >
-                          View trace
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="flex justify-between items-center mt-3">
-              <button
-                className="text-sm px-2 py-1 border rounded-lg"
-                disabled={page === 0}
-                onClick={() => setPage((p) => Math.max(0, p - 1))}
-              >
-                Prev
-              </button>
-              <div className="text-sm">{imps.total} total</div>
-              <button
-                className="text-sm px-2 py-1 border rounded-lg"
-                disabled={(page + 1) * pageSize >= imps.total}
-                onClick={() => setPage((p) => p + 1)}
-              >
-                Next
-              </button>
-            </div>
+          <Card title={`Impressions`}>
+            <ImpressionsTable
+              rows={imps.items as unknown as ImpressionRow[]}
+              totalCount={imps.total}
+              pageIndex={page}
+              pageSize={pageSize}
+              onChangePageIndex={setPage}
+              initialSort={{ column: "timestamp", direction: "asc" }}
+            />
           </Card>
+
+          <AdvancedFiltersDrawer
+            open={isAdvancedOpen}
+            onClose={() => setIsAdvancedOpen(false)}
+            resultsCountLabel={`${imps.total.toLocaleString()} results`}
+          />
 
           {showTrace && (
             <div

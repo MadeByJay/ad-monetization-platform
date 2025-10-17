@@ -32,7 +32,9 @@ export const GEO_POOL = [
   'IN',
   'BR',
 ] as const;
+
 export const DEVICE_POOL = ['desktop', 'mobile'] as const;
+
 export const TAG_POOL = [
   'tech',
   'gaming',
@@ -65,4 +67,34 @@ export const BRANDS = [
 
 export function makeUuid(): string {
   return crypto.randomUUID();
+}
+
+export const STUDIO_NAMES = [
+  'Aquila',
+  'Northstar',
+  'Nimbus',
+  'Meridian',
+  'Harbor',
+  'Catalyst',
+] as const;
+
+export const BRAND_NAMES = [
+  'Acme',
+  'Globex',
+  'Initech',
+  'Umbrella',
+  'Soylent',
+  'Vandelay',
+  'Stark',
+  'Wayne',
+  'Wonka',
+  'Tyrell',
+] as const;
+
+export function pickInt(rand: () => number, min: number, max: number) {
+  return Math.floor(rand() * (max - min + 1)) + min;
+}
+
+export function range(n: number) {
+  return Array.from({ length: n }, (_, i) => i);
 }

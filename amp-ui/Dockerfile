@@ -8,7 +8,7 @@ RUN pnpm install --frozen-lockfile=false
 
 # copy sources
 COPY . .
-ENV PORT=3000
-EXPOSE 3000
+ENV PORT=3001
+EXPOSE 3001
 CMD ["pnpm","run","dev"]
 

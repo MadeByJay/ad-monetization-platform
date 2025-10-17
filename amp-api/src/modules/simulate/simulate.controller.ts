@@ -11,14 +11,18 @@ import {
 import type { Response } from 'express';
 import { SimulateService } from './simulate.service';
 import { StartRunDto } from './dto/start-run.dto';
+import { CurrentUser, RequestUser } from '../auth/current-user.decorator';
 
 @Controller()
 export class SimulateController {
   constructor(private readonly simulateService: SimulateService) {}
 
   @Post('simulate/run')
-  async startRun(@Body() payload: StartRunDto) {
-    return this.simulateService.startRun(payload);
+  async startRun(
+    @Body() payload: StartRunDto,
+    @CurrentUser() user: RequestUser | null,
+  ) {
+    return this.simulateService.startRunScoped(payload, user ?? null);
   }
 
   @Get('simulate/run/:id')

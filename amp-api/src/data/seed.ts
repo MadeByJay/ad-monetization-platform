@@ -1,5 +1,5 @@
 import type { INestApplicationContext } from '@nestjs/common';
-import { sql, type Insertable } from 'kysely';
+import type { Insertable } from 'kysely';
 import { Repositories } from '../repositories/repositories';
 import type {
   CampaignsTable,
@@ -7,42 +7,479 @@ import type {
   ScenariosTable,
 } from '../types/database';
 import {
-  BRANDS,
-  DEVICE_POOL,
-  GEO_POOL,
-  TAG_POOL,
-  pickMany,
-  pickOne,
   seededRandom,
+  pickOne,
+  pickMany,
   makeUuid,
+  GEO_POOL,
+  DEVICE_POOL,
+  TAG_POOL,
+  BRAND_NAMES,
+  STUDIO_NAMES,
+  pickInt,
+  range,
 } from './seed.utils';
 import { AppModule } from 'src/app.module';
 
 /**
- * Idempotent, scalable seed.
- * - Truncates tables (CASCADE) so you always start clean.
- * - Creates N campaigns (N = 8 * SEED_SCALE), each with display and/or video creatives.
- * - Adds a couple of scenarios for demos (article + video).
- *
- * Environment knobs:
- *   SEED_SCALE: integer multiplier (default 1)  -> campaigns = 8 * scale
+ * Idempotent seed tied to the Default account + Demo user.
+ * - Brands (10) + Products (5–7 each) (upsert by name / (brand_id,name))
+ * - Studios (6) + Movies (3–5 each) (upsert studios by name)
+ * - Inventory (networks/channels/services/series/seasons/episodes/events/pods/slots)
+ * - Campaigns & Creatives (still present for now; creatives stamped with account_id)
+ * - Scenarios (stamped with account/user)
+ * - IO / Line Items / Policy (stamped with account_id)
  */
 export async function seedWithApp(app: INestApplicationContext): Promise<void> {
   const repositories = app.get(Repositories);
-  // Access the underlying Kysely DB to run TRUNCATE CASCADE
-  const db = app.get<any>('DB');
+  const db: any = app.get('DB');
 
-  // 0 - Clean slate
-  await sql`TRUNCATE TABLE impressions, runs, creatives, campaigns, scenarios RESTART IDENTITY CASCADE;`.execute(
-    db,
+  // Resolve Default account and Demo user
+  const defaultAccount = await db
+    .selectFrom('accounts')
+    .select(['id'])
+    .where('slug', '=', 'default')
+    .executeTakeFirst();
+
+  if (!defaultAccount)
+    throw new Error('Default account missing (boot DDL should create it)');
+
+  const accountId = defaultAccount.id as string;
+
+  const demoUser = await db
+    .selectFrom('users')
+    .select(['id'])
+    .where('email', '=', 'demo@amp.local')
+    .executeTakeFirst();
+
+  if (!demoUser)
+    throw new Error('Demo user missing (boot DDL should create it)');
+  const demoUserId = demoUser.id as string;
+
+  // Truncate only data we strictly own (OPTIONAL). Comment these if you prefer additive seeds.
+  // await db.executeQuery({ sql: `TRUNCATE TABLE impressions, runs, campaign_dim, creatives, campaigns, scenarios, movies, products, studios, brands, networks, channels, services, series, seasons, episodes, event_occurrences, event_series, ad_pods, pod_slots RESTART IDENTITY CASCADE;`, parameters: [] })
+
+  const scale = Math.max(1, Number(process.env.SEED_SCALE || 1));
+  const rand = seededRandom(1337 * scale);
+
+  // Brands (upsert by name) & Products (idempotent) 
+  const desiredBrandNames = (
+    BRAND_NAMES ?? [
+      'Acme',
+      'Globex',
+      'Initech',
+      'Umbrella',
+      'Soylent',
+      'Vandelay',
+      'Stark',
+      'Wayne',
+      'Wonka',
+      'Tyrell',
+    ]
+  ).slice(0, 10);
+
+  const existingBrandRows = await db
+    .selectFrom('brands')
+    .select(['id', 'name'])
+    .where('name', 'in', desiredBrandNames as any)
+    .execute();
+
+  const brandNameToId = new Map<string, string>(
+    existingBrandRows.map((b: any) => [b.name, b.id]),
   );
 
-  // 1 - Parameters
-  const scale = Math.max(1, Number(process.env.SEED_SCALE || 1));
-  const totalCampaigns = 8 * scale;
-  const random = seededRandom(1337 * scale);
+  const brandsToInsert = desiredBrandNames
+    .filter((n) => !brandNameToId.has(n))
+    .map((n) => ({ id: makeUuid(), name: n }));
 
-  // 2 - Seed campaigns + creatives
+  if (brandsToInsert.length) {
+    const insertedBrands = await db
+      .insertInto('brands')
+      .values(brandsToInsert)
+      .onConflict((oc: any) => oc.column('name').doNothing())
+      .returning(['id', 'name'])
+      .execute();
+    for (const row of insertedBrands) brandNameToId.set(row.name, row.id);
+  }
+
+  const brandRows = desiredBrandNames.map((name) => ({
+    id: brandNameToId.get(name)!,
+    name,
+  }));
+
+  const existingProducts = await db
+    .selectFrom('products')
+    .select(['id', 'name', 'brand_id'])
+    .where('brand_id', 'in', brandRows.map((b) => b.id) as any)
+    .execute();
+  const existingProductKey = new Set(
+    existingProducts.map((p: any) => `${p.brand_id}::${p.name}`),
+  );
+
+  const productRows: Array<{ id: string; name: string; brand_id: string }> = [];
+  for (const brand of brandRows) {
+    const count = pickInt(rand, 5, 7);
+    for (let i = 1; i <= count; i++) {
+      const name = `${brand.name} Product ${i}`;
+      const key = `${brand.id}::${name}`;
+      if (!existingProductKey.has(key)) {
+        productRows.push({ id: makeUuid(), name, brand_id: brand.id });
+        existingProductKey.add(key);
+      }
+    }
+  }
+  if (productRows.length) {
+    await db
+      .insertInto('products')
+      .values(productRows)
+      .onConflict((oc: any) => oc.columns(['brand_id', 'name']).doNothing())
+      .execute();
+  }
+
+  // Studios (upsert by name) & Movies 
+  const desiredStudioNames = (
+    STUDIO_NAMES ?? [
+      'Aquila',
+      'Northstar',
+      'Nimbus',
+      'Meridian',
+      'Harbor',
+      'Catalyst',
+    ]
+  ).slice(0, 6);
+
+  const existingStudioRows = await db
+    .selectFrom('studios')
+    .select(['id', 'name'])
+    .where('name', 'in', desiredStudioNames as any)
+    .execute();
+    
+  const studioNameToId = new Map<string, string>(
+    existingStudioRows.map((s: any) => [s.name, s.id]),
+  );
+  
+  const studiosToInsert = desiredStudioNames
+    .filter((n) => !studioNameToId.has(n))
+    .map((n) => ({ id: makeUuid(), name: n }));
+    
+  if (studiosToInsert.length) {
+    const insertedStudios = await db
+      .insertInto('studios')
+      .values(studiosToInsert)
+      .onConflict((oc: any) => oc.column('name').doNothing())
+      .returning(['id', 'name'])
+      .execute();
+    for (const row of insertedStudios) studioNameToId.set(row.name, row.id);
+  }
+  const studioRows = desiredStudioNames.map((name) => ({
+    id: studioNameToId.get(name)!,
+    name,
+  }));
+
+  const movieRows: Array<{
+    id: string;
+    title: string;
+    studio_id: string;
+    release_date: string | null;
+  }> = [];
+  for (const s of studioRows) {
+    const count = pickInt(rand, 3, 5);
+    
+    for (let i = 1; i <= count; i++) {
+      movieRows.push({
+        id: makeUuid(),
+        title: `${s.name} Movie ${i}`,
+        studio_id: s.id,
+        release_date: null,
+      });
+    }
+  }
+  
+  if (movieRows.length)
+    await db.insertInto('movies').values(movieRows).execute();
+
+  // Inventory (networks/services/series/…/pods)
+  const networks = [
+    { id: makeUuid(), name: 'WBD Sports' },
+    { id: makeUuid(), name: 'WBD News' },
+    { id: makeUuid(), name: 'WBD Entertainment' },
+  ];
+
+  await db.insertInto('networks').values(networks).execute();
+
+  const channels = [
+    { id: makeUuid(), network_id: networks[0].id, name: 'Sports One' },
+    { id: makeUuid(), network_id: networks[0].id, name: 'Sports Plus' },
+    { id: makeUuid(), network_id: networks[1].id, name: 'News 24' },
+    { id: makeUuid(), network_id: networks[2].id, name: 'Drama HD' },
+    { id: makeUuid(), network_id: networks[2].id, name: 'Comedy HD' },
+  ];
+
+  await db.insertInto('channels').values(channels).execute();
+
+  const services = [
+    { id: makeUuid(), name: 'StreamX', type: 'AVOD' },
+    { id: makeUuid(), name: 'FreeX FAST', type: 'FAST' },
+  ];
+
+  await db.insertInto('services').values(services).execute();
+
+  const studioIdOrNull = (i: number) =>
+    studioRows.length ? studioRows[i % studioRows.length].id : null;
+
+  const seriesRows = [
+    {
+      id: makeUuid(),
+      studio_id: studioIdOrNull(0),
+      title: 'Galactic Quest',
+      genre: 'Sci-Fi',
+      rating: 'TV-14',
+    },
+    {
+      id: makeUuid(),
+      studio_id: studioIdOrNull(1),
+      title: 'City Beat',
+      genre: 'Crime',
+      rating: 'TV-MA',
+    },
+    {
+      id: makeUuid(),
+      studio_id: studioIdOrNull(2),
+      title: 'Laugh Lane',
+      genre: 'Comedy',
+      rating: 'TV-PG',
+    },
+  ];
+
+  await db.insertInto('series').values(seriesRows).execute();
+
+  const seasonRows: any[] = [];
+  const episodeRows: any[] = [];
+
+  //TODO - Refactor this algo
+  for (const s of seriesRows) {
+    for (const seasonNumber of [1, 2]) {
+      const seasonId = makeUuid();
+
+      seasonRows.push({ id: seasonId, series_id: s.id, number: seasonNumber });
+
+      for (let ep = 1; ep <= 5; ep++) {
+        episodeRows.push({
+          id: makeUuid(),
+          season_id: seasonId,
+          number: ep,
+          duration_sec: 22 * 60,
+        });
+      }
+    }
+  }
+
+  if (seasonRows.length)
+    await db.insertInto('seasons').values(seasonRows).execute();
+
+  if (episodeRows.length)
+    await db.insertInto('episodes').values(episodeRows).execute();
+
+  const firstStudioId = studioRows.length ? studioRows[0].id : null;
+
+  const eventSeriesRows = [
+    {
+      id: makeUuid(),
+      studio_id: firstStudioId,
+      name: 'Pro Basketball 2025',
+      sport_or_kind: 'Basketball',
+    },
+  ];
+
+  await db.insertInto('event_series').values(eventSeriesRows).execute();
+
+  const eventOccurrencesRows = Array.from({ length: 3 }).map((_, i) => ({
+    id: makeUuid(),
+    event_series_id: eventSeriesRows[0].id,
+    starts_at: new Date(Date.now() + i * 86400000).toISOString(),
+    venue: `Arena ${i + 1}`,
+    duration_sec: 2 * 60 * 60,
+  }));
+
+  await db
+    .insertInto('event_occurrences')
+    .values(eventOccurrencesRows)
+    .execute();
+
+  const podRows: any[] = [];
+  const slotRows: any[] = [];
+
+  function seedPodsForEpisode(epId: string) {
+    const prerollId = makeUuid();
+
+    podRows.push({
+      id: prerollId,
+      content_type: 'episode',
+      content_id: epId,
+      at_sec: 0,
+      pod_type: 'preroll',
+      max_duration_sec: 120,
+    });
+
+    slotRows.push({
+      id: makeUuid(),
+      ad_pod_id: prerollId,
+      position: 1,
+      duration_sec: 15,
+    });
+
+    slotRows.push({
+      id: makeUuid(),
+      ad_pod_id: prerollId,
+      position: 2,
+      duration_sec: 15,
+    });
+
+    for (const mid of [7 * 60, 14 * 60]) {
+      const podId = makeUuid();
+
+      podRows.push({
+        id: podId,
+        content_type: 'episode',
+        content_id: epId,
+        at_sec: mid,
+        pod_type: 'midroll',
+        max_duration_sec: 120,
+      });
+
+      slotRows.push({
+        id: makeUuid(),
+        ad_pod_id: podId,
+        position: 1,
+        duration_sec: 30,
+      });
+
+      slotRows.push({
+        id: makeUuid(),
+        ad_pod_id: podId,
+        position: 2,
+        duration_sec: 15,
+      });
+    }
+
+    const postId = makeUuid();
+
+    podRows.push({
+      id: postId,
+      content_type: 'episode',
+      content_id: epId,
+      at_sec: null,
+      pod_type: 'postroll',
+      max_duration_sec: 60,
+    });
+
+    slotRows.push({
+      id: makeUuid(),
+      ad_pod_id: postId,
+      position: 1,
+      duration_sec: 15,
+    });
+  }
+
+  function seedPodsForMovie(movieId: string) {
+    const prerollId = makeUuid();
+
+    podRows.push({
+      id: prerollId,
+      content_type: 'movie',
+      content_id: movieId,
+      at_sec: 0,
+      pod_type: 'preroll',
+      max_duration_sec: 120,
+    });
+
+    slotRows.push({
+      id: makeUuid(),
+      ad_pod_id: prerollId,
+      position: 1,
+      duration_sec: 30,
+    });
+
+    for (const mid of [20 * 60, 40 * 60, 70 * 60]) {
+      const podId = makeUuid();
+
+      podRows.push({
+        id: podId,
+        content_type: 'movie',
+        content_id: movieId,
+        at_sec: mid,
+        pod_type: 'midroll',
+        max_duration_sec: 150,
+      });
+
+      slotRows.push({
+        id: makeUuid(),
+        ad_pod_id: podId,
+        position: 1,
+        duration_sec: 30,
+      });
+
+      slotRows.push({
+        id: makeUuid(),
+        ad_pod_id: podId,
+        position: 2,
+        duration_sec: 30,
+      });
+
+      slotRows.push({
+        id: makeUuid(),
+        ad_pod_id: podId,
+        position: 3,
+        duration_sec: 15,
+      });
+    }
+  }
+  function seedPodsForLive(eventId: string) {
+    for (let i = 0; i < 6; i++) {
+      const podId = makeUuid();
+
+      podRows.push({
+        id: podId,
+        content_type: 'event_occurrence',
+        content_id: eventId,
+        at_sec: null,
+        pod_type: 'linear_break',
+        max_duration_sec: 120,
+      });
+
+      slotRows.push({
+        id: makeUuid(),
+        ad_pod_id: podId,
+        position: 1,
+        duration_sec: 30,
+      });
+
+      slotRows.push({
+        id: makeUuid(),
+        ad_pod_id: podId,
+        position: 2,
+        duration_sec: 30,
+      });
+    }
+  }
+
+  if (episodeRows.length)
+    for (const e of episodeRows.slice(0, Math.min(12, episodeRows.length)))
+      seedPodsForEpisode(e.id);
+
+  if (movieRows.length)
+    for (const m of movieRows.slice(0, Math.min(5, movieRows.length)))
+      seedPodsForMovie(m.id);
+
+  if (eventOccurrencesRows.length)
+    for (const ev of eventOccurrencesRows) seedPodsForLive(ev.id);
+
+  if (podRows.length) await db.insertInto('ad_pods').values(podRows).execute();
+
+  if (slotRows.length)
+    await db.insertInto('pod_slots').values(slotRows).execute();
+
+  // Campaigns & Creatives (creatives stamped with account)
   const campaigns: Insertable<CampaignsTable>[] = [];
   const creatives: Insertable<CreativesTable>[] = [];
 
@@ -54,54 +491,60 @@ export async function seedWithApp(app: INestApplicationContext): Promise<void> {
     ['preroll', 'midroll', 'display'],
   ];
 
+  const totalCampaigns = 8 * scale;
+
   for (let index = 0; index < totalCampaigns; index++) {
-    const brand = pickOne(random, BRANDS);
     const id = makeUuid();
-    const formats = pickOne(random, formatCombos);
-    const priority = 1 + Math.floor(random() * 10); // 1..10
-    const cpmBid = Number((1.5 + random() * 12).toFixed(2)); // ~1.5..13.5
-    const dailyBudget = Number((50 + random() * 450).toFixed(2)); // ~50..500
-    const pacing_strategy = random() < 0.6 ? 'even' : 'asap'; // bias to even
-    const freqCap = 1 + Math.floor(random() * 4); // 1..4
+    const formats = pickOne(rand, formatCombos);
+    const priority = 1 + Math.floor(rand() * 10);
+    const cpmBid = Number((1.5 + rand() * 12).toFixed(2));
+    const dailyBudget = Number((50 + rand() * 450).toFixed(2));
+    const pacingStrategy = rand() < 0.6 ? 'even' : 'asap';
+    const freqCap = 1 + Math.floor(rand() * 4);
 
     const targeting_json = {
-      geo: pickMany(random, GEO_POOL, 3 + Math.floor(random() * 3)), // 3-5 geos
-      device: pickMany(random, DEVICE_POOL, 1 + Math.floor(random() * 1)), // 1-2 devices
-      contentTags: pickMany(random, TAG_POOL, 3 + Math.floor(random() * 3)), // 3-5 tags
+      geo: pickMany(rand, GEO_POOL, 3 + Math.floor(rand() * 3)),
+      device: pickMany(rand, DEVICE_POOL, 1 + Math.floor(rand() * 1)),
+      contentTags: pickMany(rand, TAG_POOL, 3 + Math.floor(rand() * 3)),
     };
 
-    const campaign: Insertable<CampaignsTable> = {
+    campaigns.push({
       id,
-      name: `${brand} ${index + 1}`,
+      name: `Campaign ${index + 1}`,
       priority,
       cpm_bid: cpmBid,
       daily_budget: dailyBudget,
-      pacing_strategy: pacing_strategy as 'even' | 'asap',
+      pacing_strategy: pacingStrategy as any,
       freq_cap_user_day: freqCap,
       targeting_json,
-      formats_json: formats as any, // JSON array
+      formats_json: formats as any,
       active: true,
-    };
-    campaigns.push(campaign);
+    });
 
     // Creatives: if video formats present, add a couple of video creatives
     const hasVideo = formats.includes('preroll') || formats.includes('midroll');
+
     if (hasVideo) {
       creatives.push({
         id: makeUuid(),
         campaign_id: id,
+        line_item_id: null,
         type: 'video',
         duration_sec: 15,
         size: null,
         brand_safety: 'G',
+        account_id: accountId,
       });
+
       creatives.push({
         id: makeUuid(),
         campaign_id: id,
+        line_item_id: null,
         type: 'video',
         duration_sec: 30,
         size: null,
         brand_safety: 'PG',
+        account_id: accountId,
       });
     }
 
@@ -110,27 +553,82 @@ export async function seedWithApp(app: INestApplicationContext): Promise<void> {
       creatives.push({
         id: makeUuid(),
         campaign_id: id,
+        line_item_id: null,
         type: 'display',
         duration_sec: null,
         size: '300x250',
         brand_safety: 'G',
+        account_id: accountId,
       });
+
       creatives.push({
         id: makeUuid(),
         campaign_id: id,
+        line_item_id: null,
         type: 'display',
         duration_sec: null,
         size: '728x90',
         brand_safety: 'G',
+        account_id: accountId,
       });
     }
   }
-
-  // Bulk insert via repositories
   for (const c of campaigns) await repositories.campaigns.create(c);
-  for (const k of creatives) await repositories.creatives.create(k);
 
-  // 3 - Scenarios (2 examples)
+  if (creatives.length)
+    await db.insertInto('creatives').values(creatives).execute();
+
+  // Attach campaign dimensions (guarded)
+  const campaignDimRows: Array<{
+    campaign_id: string;
+    brand_id?: string | null;
+    product_id?: string | null;
+    studio_id?: string | null;
+    movie_id?: string | null;
+  }> = [];
+  for (const c of campaigns) {
+    const canUseBrand = brandRows.length && productRows.length;
+    const canUseStudio = studioRows.length && movieRows.length;
+
+    if (canUseBrand && (!canUseStudio || rand() < 0.5)) {
+      const brand = brandRows[Math.floor(rand() * brandRows.length)];
+      const prods = productRows.filter((p) => p.brand_id === brand.id);
+
+      if (prods.length) {
+        const prod = prods[Math.floor(rand() * prods.length)];
+        campaignDimRows.push({
+          campaign_id: c.id,
+          brand_id: brand.id,
+          product_id: prod.id,
+          studio_id: null,
+          movie_id: null,
+        });
+        continue;
+      }
+    }
+
+    if (canUseStudio) {
+      const st = studioRows[Math.floor(rand() * studioRows.length)];
+      const movs = movieRows.filter((m) => m.studio_id === st.id);
+
+      if (movs.length) {
+        const mv = movs[Math.floor(rand() * movs.length)];
+        campaignDimRows.push({
+          campaign_id: c.id,
+          brand_id: null,
+          product_id: null,
+          studio_id: st.id,
+          movie_id: mv.id,
+        });
+        continue;
+      }
+    }
+  }
+
+  if (campaignDimRows.length)
+    await db.insertInto('campaign_dim').values(campaignDimRows).execute();
+
+  // Scenarios (scoped) 
   const scenarios: Insertable<ScenariosTable>[] = [
     {
       id: makeUuid(),
@@ -138,6 +636,7 @@ export async function seedWithApp(app: INestApplicationContext): Promise<void> {
       config_json: {
         content: {
           kind: 'article',
+          brandSafety: 'G',
           placements: [
             { slotType: 'display', position: 'top' },
             { slotType: 'display', position: 'sidebar' },
@@ -152,7 +651,7 @@ export async function seedWithApp(app: INestApplicationContext): Promise<void> {
         },
         lengthImpressions: 200 * scale,
       },
-      created_at: undefined as never, // let DB default fill
+      created_at: null as any,
     },
     {
       id: makeUuid(),
@@ -160,6 +659,7 @@ export async function seedWithApp(app: INestApplicationContext): Promise<void> {
       config_json: {
         content: {
           kind: 'video',
+          brandSafety: 'PG',
           placements: [
             { slotType: 'preroll', at: 0 },
             { slotType: 'midroll', at: 60 },
@@ -174,20 +674,182 @@ export async function seedWithApp(app: INestApplicationContext): Promise<void> {
         },
         lengthImpressions: 150 * scale,
       },
-      created_at: undefined as never,
+      created_at: null as any,
     },
   ];
 
   for (const s of scenarios) {
-    await repositories.scenarios.create(s);
+    await repositories.scenariosScoped.create({
+      id: s.id,
+      name: s.name,
+      config_json: s.config_json,
+      account_id: accountId,
+      created_by_user_id: demoUserId,
+      created_at: undefined as any,
+    } as any);
   }
+
+  // Demand (IO / LI / policy) with account ownership 
+  const ioId1 = makeUuid();
+  await db
+    .insertInto('insertion_orders')
+    .values({
+      id: ioId1,
+      name: 'Q4 Brand IO',
+      advertiser: 'Acme Corp',
+      start_date: new Date(),
+      end_date: new Date(Date.now() + 60 * 86400000),
+      budget_total: 250000,
+      status: 'active',
+      created_at: new Date() as any,
+      account_id: accountId,
+    })
+    .execute();
+
+  const ioId2 = makeUuid();
+  await db
+    .insertInto('insertion_orders')
+    .values({
+      id: ioId2,
+      name: 'Studio Launch IO',
+      advertiser: 'Nimbus Studios',
+      start_date: new Date(),
+      end_date: new Date(Date.now() + 45 * 86400000),
+      budget_total: 180000,
+      status: 'active',
+      created_at: new Date() as any,
+      account_id: accountId,
+    })
+    .execute();
+
+  const li1 = {
+    id: makeUuid(),
+    io_id: ioId1,
+    name: 'Acme Pre/Midroll',
+    start_dt: new Date(),
+    end_dt: new Date(Date.now() + 30 * 86400000),
+    budget: 80000,
+    cpm_bid: 22,
+    pacing_strategy: 'even',
+    targeting_json: {
+      geo: ['US', 'CA'],
+      device: ['desktop', 'mobile'],
+      slot: ['preroll', 'midroll'],
+    },
+    caps_json: { freq_cap_user_day: 3 },
+    floors_json: { first_in_pod: 25 },
+    status: 'active',
+    created_at: new Date() as any,
+    account_id: accountId,
+  };
+
+  const li2 = {
+    id: makeUuid(),
+    io_id: ioId1,
+    name: 'Acme Display Companions',
+    start_dt: new Date(),
+    end_dt: new Date(Date.now() + 30 * 86400000),
+    budget: 20000,
+    cpm_bid: 5,
+    pacing_strategy: 'asap',
+    targeting_json: { geo: ['US'], slot: ['display'] },
+    caps_json: {},
+    floors_json: {},
+    status: 'active',
+    created_at: new Date() as any,
+    account_id: accountId,
+  };
+
+  const li3 = {
+    id: makeUuid(),
+    io_id: ioId2,
+    name: 'Nimbus Launch Spots',
+    start_dt: new Date(),
+    end_dt: new Date(Date.now() + 40 * 86400000),
+    budget: 100000,
+    cpm_bid: 20,
+    pacing_strategy: 'even',
+    targeting_json: {
+      genres: ['Sci-Fi', 'Comedy'],
+      ratings: ['TV-PG', 'TV-14'],
+    },
+    caps_json: { freq_cap_user_day: 2 },
+    floors_json: { preroll: 18 },
+    status: 'active',
+    created_at: new Date() as any,
+    account_id: accountId,
+  };
+
+  await db.insertInto('line_items').values([li1, li2, li3]).execute();
+
+  await db
+    .insertInto('category_exclusions')
+    .values([
+      { id: makeUuid(), line_item_id: li1.id, category: 'alcohol' },
+      { id: makeUuid(), line_item_id: li1.id, category: 'gambling' },
+    ])
+    .execute();
+
+  await db
+    .insertInto('competitive_separation')
+    .values([
+      {
+        id: makeUuid(),
+        line_item_id: li1.id,
+        category: 'soft-drink',
+        min_separation_min: 3,
+      },
+    ])
+    .execute();
+
+  await db
+    .insertInto('creatives')
+    .values([
+      {
+        id: makeUuid(),
+        campaign_id: null,
+        line_item_id: li1.id,
+        type: 'video',
+        duration_sec: 15,
+        size: null,
+        brand_safety: 'G',
+        account_id: accountId,
+      },
+      {
+        id: makeUuid(),
+        campaign_id: null,
+        line_item_id: li1.id,
+        type: 'video',
+        duration_sec: 30,
+        size: null,
+        brand_safety: 'PG',
+        account_id: accountId,
+      },
+      {
+        id: makeUuid(),
+        campaign_id: null,
+        line_item_id: li2.id,
+        type: 'display',
+        duration_sec: null,
+        size: '300x250',
+        brand_safety: 'G',
+        account_id: accountId,
+      },
+      {
+        id: makeUuid(),
+        campaign_id: null,
+        line_item_id: li3.id,
+        type: 'video',
+        duration_sec: 30,
+        size: null,
+        brand_safety: 'G',
+        account_id: accountId,
+      },
+    ])
+    .execute();
 }
 
-/**
- * Optional standalone entry (only if you run: node dist/data/seed.js)
- * Not used during normal server startup where we call seedWithApp(app).
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// Standalone runner (optional)
 declare const require: any, module: any;
 if (
   typeof require !== 'undefined' &&
@@ -196,20 +858,19 @@ if (
 ) {
   (async () => {
     const { NestFactory } = await import('@nestjs/core');
+
     const app = await NestFactory.createApplicationContext(AppModule, {
       logger: false,
     });
+
     try {
-      console.log('Seed starting');
       await seedWithApp(app);
-      // eslint-disable-next-line no-console
       console.log('Seed completed');
     } finally {
       await app.close();
     }
-  })().catch((error) => {
-    // eslint-disable-next-line no-console
-    console.error(error);
+  })().catch((err) => {
+    console.error(err);
     process.exit(1);
   });
 }

@@ -10,6 +10,13 @@ import { AuctionModule } from './modules/auction/auction.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { PacingModule } from './modules/pacing/pacing.module';
 import { FrequencyModule } from './modules/frequency/frequency.module';
+import { DimensionsModule } from './modules/dimensions/dimensions.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
+import { DemandModule } from './modules/demand/demand.module';
+import { RollupsModule } from './modules/rollups/rollups.module';
+import { ExportsModule } from './modules/exports/exports.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { AccountsModule } from './modules/accounts/accounts.module';
 
 @Module({
   imports: [
@@ -43,6 +50,13 @@ import { FrequencyModule } from './modules/frequency/frequency.module';
     RedisModule,
     PacingModule,
     FrequencyModule,
+    DimensionsModule,
+    InventoryModule,
+    DemandModule,
+    RollupsModule,
+    ExportsModule,
+    AuthModule,
+    AccountsModule,
     AppModule,
   ],
 })

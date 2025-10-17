@@ -6,6 +6,7 @@ import { SimulateService } from './simulate.service';
 import { AuctionModule } from '../auction/auction.module';
 import { PacingModule } from '../pacing/pacing.module';
 import { FrequencyModule } from '../frequency/frequency.module';
+import { RollupsModule } from '../rollups/rollups.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { FrequencyModule } from '../frequency/frequency.module';
     AuctionModule,
     PacingModule,
     FrequencyModule,
+    RollupsModule,
   ],
   controllers: [SimulateController],
   providers: [SimulateService],

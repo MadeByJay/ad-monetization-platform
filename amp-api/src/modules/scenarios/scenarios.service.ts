@@ -12,23 +12,34 @@ interface PreviewScenarioPayload {
   config_json?: Record<string, unknown>;
   sample_size?: number;
   seed?: number;
+  brand_safety?: 'G' | 'PG' | 'M';
 }
 
 @Injectable()
 export class ScenariosService {
   constructor(private readonly repositories: Repositories) {}
 
-  async list() {
-    const scenarios = await this.repositories.scenarios.list();
+  async list(accountId: string) {
+    const scenarios = await this.repositories.scenariosScoped.list(accountId);
     return { scenarios };
   }
 
-  async get(id: string) {
-    const scenario = await this.repositories.scenarios.get(id);
-    return scenario ?? { error: 'scenario_not_found' };
+  async get(accountId: string, scenarioId: string) {
+    const scenario = await this.repositories.scenariosScoped.get(
+      accountId,
+      scenarioId,
+    );
+
+    if (!scenario) return { error: 'scenario_not_found' };
+
+    return scenario;
   }
 
-  async create(payload: CreateScenarioPayload) {
+  async create(
+    accountId: string,
+    userId: string,
+    payload: CreateScenarioPayload,
+  ) {
     if (
       typeof payload?.name !== 'string' ||
       typeof payload?.config_json !== 'object'
@@ -38,75 +49,81 @@ export class ScenariosService {
 
     const id = crypto.randomUUID();
 
-    await this.repositories.scenarios.create({
+    await this.repositories.scenariosScoped.create({
       id,
       name: payload.name,
       config_json: payload.config_json,
-      // created_at defaulted by DB
+      account_id: accountId,
+      created_by_user_id: userId,
       created_at: undefined as never,
     });
-
     return { id };
   }
 
   async update(
-    id: string,
-    payload: { name: string; config_json: Record<string, unknown> },
+    accountId: string,
+    scenarioId: string,
+    payload: CreateScenarioPayload,
   ) {
-    const found = await this.repositories.scenarios.get(id);
+    const found = await this.repositories.scenariosScoped.get(
+      accountId,
+      scenarioId,
+    );
+
+    if (!found) throw new BadRequestException('scenario_not_found');
+    
+    await this.repositories.scenariosScoped.update(accountId, scenarioId, {
+      name: payload.name,
+      config_json: payload.config_json,
+    });
+    return { id: scenarioId };
+  }
+
+  async remove(accountId: string, scenarioId: string) {
+    const found = await this.repositories.scenariosScoped.get(
+      accountId,
+      scenarioId,
+    );
     if (!found) throw new BadRequestException('scenario_not_found');
 
-    // use DB directly for partial update
-    const db: any = (this as any).repositories?.database ?? null;
+    await this.repositories.scenariosScoped.remove(accountId, scenarioId);
 
-    await (db ?? (this.repositories as any).database)
-      .updateTable('scenarios')
-      .set({
-        name: payload.name,
-        config_json: JSON.stringify(payload.config_json),
-      })
-      .where('id', '=', id)
-      .execute();
-
-    return { id };
+    return { id: scenarioId, deleted: true };
   }
 
-  async remove(id: string) {
-    const db: any = (this as any).repositories?.database ?? null;
-
-    await (db ?? (this.repositories as any).database)
-      .deleteFrom('scenarios')
-      .where('id', '=', id)
-      .execute();
-
-    return { id, deleted: true };
-  }
-
-  async preview(
-    payload: PreviewScenarioPayload & { brand_safety?: 'G' | 'PG' | 'M' },
-  ) {
+  async preview(accountId: string, payload: PreviewScenarioPayload) {
     const sampleSize = Math.max(1, Number(payload.sample_size ?? 30));
+
     const seed = Number.isFinite(payload.seed)
       ? Number(payload.seed)
       : undefined;
 
-    let config = payload.config_json;
-    if (!config && payload.scenario_id) {
-      const scenario = await this.repositories.scenarios.get(
+    // 1 - Resolve scenario config (scoped)
+    let resolvedConfig = payload.config_json;
+
+    if (!resolvedConfig && payload.scenario_id) {
+      const scenario = await this.repositories.scenariosScoped.get(
+        accountId,
         payload.scenario_id,
       );
 
       if (!scenario) throw new BadRequestException('scenario_not_found');
-      config =
+
+      resolvedConfig =
         typeof scenario.config_json === 'string'
-          ? JSON.parse(scenario.config_json as unknown as string)
+          ? JSON.parse(scenario.config_json as any)
           : (scenario.config_json as Record<string, unknown>);
     }
+    if (!resolvedConfig)
+      throw new BadRequestException('missing_config_or_scenario_id');
 
-    if (!config) throw new BadRequestException('missing_config_or_scenario_id');
-
-    const placements = Array.isArray((config as any)?.content?.placements)
-      ? ((config as any).content.placements as Array<{ slotType?: string }>)
+    // 2 - Extract placements and cohort
+    const placements = Array.isArray(
+      (resolvedConfig as any)?.content?.placements,
+    )
+      ? ((resolvedConfig as any).content.placements as Array<{
+          slotType?: string;
+        }>)
       : [{ slotType: 'display' }];
 
     const slotTypes: SlotType[] = placements
@@ -115,46 +132,53 @@ export class ScenariosService {
         (s): s is SlotType =>
           s === 'preroll' || s === 'midroll' || s === 'display',
       );
-
     if (slotTypes.length === 0) slotTypes.push('display');
 
-    const geoWeights = (config as any)?.cohort?.geoWeights ?? { US: 1 };
-    const deviceWeights = (config as any)?.cohort?.deviceWeights ?? {
+    const geoWeights = (resolvedConfig as any)?.cohort?.geoWeights ?? { US: 1 };
+
+    const deviceWeights = (resolvedConfig as any)?.cohort?.deviceWeights ?? {
       desktop: 1,
       mobile: 1,
     };
+
     const contentTags: string[] = Array.isArray(
-      (config as any)?.cohort?.contentTags,
+      (resolvedConfig as any)?.cohort?.contentTags,
     )
-      ? (config as any).cohort.contentTags
+      ? (resolvedConfig as any).cohort.contentTags
       : ['general'];
 
-    // brand safety: override > config > default
+    // brand safety override > config > default
     const brandSafety: 'G' | 'PG' | 'M' =
       payload.brand_safety ??
-      ((config as any)?.content?.brandSafety as any) ??
+      ((resolvedConfig as any)?.content?.brandSafety as any) ??
       'G';
 
-    const rand = seededRandom(seed ?? Date.now());
+    // 3 - Random helpers
+    const random = seededRandom(seed ?? Date.now());
 
+    // 4 - Generate synthetic opportunities
     const sample: SlotOpportunity[] = Array.from({ length: sampleSize }).map(
       () => {
-        const slotType = pickWeighted(slotTypes, undefined, rand);
+        const slotType = pickWeighted(slotTypes, undefined, random);
+
         const geo = pickWeighted(
           Object.keys(geoWeights),
           Object.values(geoWeights),
-          rand,
+          random,
         );
+
         const device = pickWeighted(
           Object.keys(deviceWeights),
           Object.values(deviceWeights),
-          rand,
+          random,
         ) as 'desktop' | 'mobile';
 
         const tags = pickSome(
           contentTags,
-          1 + Math.floor(rand() * Math.min(3, Math.max(1, contentTags.length))),
+          1 +
+            Math.floor(random() * Math.min(3, Math.max(1, contentTags.length))),
         );
+
         const ts = new Date();
         const userId = `${device}_${geo}`;
 
@@ -167,10 +191,13 @@ export class ScenariosService {
       },
     );
 
+    // 5 - Aggregate preview mix
     const mix = {
-      slots: countsAndPct(sample.map((s) => s.slotType)),
-      geo: countsAndPct(sample.map((s) => s.user.geo ?? 'NA')),
-      device: countsAndPct(sample.map((s) => s.user.device ?? 'unknown')),
+      slots: countsAndPercentages(sample.map((s) => s.slotType)),
+      geo: countsAndPercentages(sample.map((s) => s.user.geo ?? 'NA')),
+      device: countsAndPercentages(
+        sample.map((s) => s.user.device ?? 'unknown'),
+      ),
     };
 
     return {
@@ -191,7 +218,7 @@ function seededRandom(seed: number) {
   return () => (value = (value * 16807) % 2147483647) / 2147483647;
 }
 
-/** Pick 1 value; if weights is undefined, pick uniform. */
+// Pick 1 value; if weights is undefined, pick uniform.
 function pickWeighted<T>(
   items: T[],
   weights: number[] | undefined,
@@ -233,7 +260,7 @@ function pickSome<T>(arr: T[], k: number): T[] {
   return out;
 }
 
-function countsAndPct(values: string[]) {
+function countsAndPercentages(values: string[]) {
   const counts: Record<string, number> = {};
   for (const v of values) counts[v] = (counts[v] ?? 0) + 1;
   const total = values.length || 1;

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import styles from "../styles/components/navbar/navbar.module.css";
@@ -12,11 +13,46 @@ const links = [
   { href: "http://localhost:4311/api/docs", label: "API Docs", external: true },
 ];
 
+function UserMenu() {
+  const [email, setEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => setEmail(d.user?.email ?? null))
+      .catch(() => setEmail(null));
+  }, []);
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    location.href = "/auth/login";
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {email ? (
+        <>
+          <span className="text-sm opacity-80">{email}</span>
+          <button
+            onClick={logout}
+            className="text-sm px-2 py-1 border rounded-lg hover:bg-gray-50"
+          >
+            Logout
+          </button>
+        </>
+      ) : (
+        <a className="text-sm" href="/auth/login">
+          Login
+        </a>
+      )}
+    </div>
+  );
+}
+
 export default function Navbar() {
-  const pathname = usePathname();
   return (
     <header
-      className={`sticky top-0 z-40 ${styles.navBackdrop} border-b border-gray-200/70`}
+      className={`sticky top-0 z-40 border-b border-gray-200/70 ${styles?.navBackdrop ?? ""}`}
     >
       <div className="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -24,28 +60,29 @@ export default function Navbar() {
           <div className="font-semibold">AMP</div>
         </div>
         <nav className="hidden md:flex items-center gap-6">
-          {links.map((l) =>
-            l.external ? (
+          {links.map((link) =>
+            link.external ? (
               <a
-                key={l.href}
-                href={l.href}
+                key={link.href}
+                href={link.href}
                 target="_blank"
                 rel="noreferrer"
                 className="text-sm text-gray-700 hover:text-gray-900"
               >
-                {l.label}
+                {link.label}
               </a>
             ) : (
               <Link
-                key={l.href}
-                href={l.href}
-                className={`text-sm text-gray-700 hover:text-gray-900 ${pathname === l.href ? styles.activeLink : ""}`}
+                key={link.href}
+                href={link.href}
+                className="text-sm text-gray-700 hover:text-gray-900"
               >
-                {l.label}
+                {link.label}
               </Link>
             ),
           )}
         </nav>
+        <UserMenu />
       </div>
     </header>
   );
